@@ -23,7 +23,7 @@ import warnings
 from functools import partial
 from io import BytesIO
 from pathlib import Path
-from typing import List
+from typing import Any, Dict, List, Union
 from unittest.mock import Mock, patch
 from urllib.parse import quote
 
@@ -57,6 +57,7 @@ from huggingface_hub.hf_api import (
     ModelSearchArguments,
     RepoFile,
     RepoUrl,
+    ReprMixin,
     SpaceInfo,
     erase_from_credential_store,
     read_from_credential_store,
@@ -83,6 +84,7 @@ from .testing_constants import (
     ENDPOINT_STAGING_BASIC_AUTH,
     FULL_NAME,
     OTHER_TOKEN,
+    OTHER_USER,
     TOKEN,
     USER,
 )
@@ -272,7 +274,7 @@ class HfApiEndpointsTest(HfApiCommonTestWithLogin):
         with pytest.raises(ValueError, match=r"No space_sdk provided.*"):
             self._api.create_repo(repo_id=SPACE_REPO_NAME, repo_type=REPO_TYPE_SPACE, space_sdk=None)
         with pytest.raises(ValueError, match=r"Invalid space_sdk.*"):
-            self._api.create_repo(repo_id=SPACE_REPO_NAME, repo_type=REPO_TYPE_SPACE, space_sdk="asdfasdf")
+            self._api.create_repo(repo_id=SPACE_REPO_NAME, repo_type=REPO_TYPE_SPACE, space_sdk="something")
 
         for sdk in SPACES_SDK_TYPES:
             SPACE_REPO_NAME = space_repo_name(sdk)
@@ -476,6 +478,16 @@ class CommitApiTest(HfApiCommonTestWithLogin):
         with pytest.raises(ValueError, match="You must use your personal account token."):
             with patch.object(self._api, "token", None):  # no default token
                 self._api.create_repo(repo_id=repo_name("org"))
+
+    def test_create_repo_already_exists_but_no_write_permission(self):
+        # Create under other user namespace
+        repo_id = self._api.create_repo(repo_id=repo_name(), token=OTHER_TOKEN).repo_id
+
+        # Try to create with our namespace -> should not fail as the repo already exists
+        self._api.create_repo(repo_id=repo_id, token=TOKEN, exist_ok=True)
+
+        # Clean up
+        self._api.delete_repo(repo_id=repo_id, token=OTHER_TOKEN)
 
     @retry_endpoint
     def test_upload_buffer(self):
@@ -1027,6 +1039,37 @@ class CommitApiTest(HfApiCommonTestWithLogin):
         finally:
             self._api.delete_repo(repo_id=REPO_NAME)
 
+    @retry_endpoint
+    def test_create_commit_repo_id_case_insensitive(self):
+        """Test create commit but repo_id is lowercased.
+
+        Regression test for #1371. Hub API is already case insensitive. Somehow the issue was with the `requests`
+        streaming implementation when generating the ndjson payload "on the fly". It seems that the server was
+        receiving only the first line which causes a confusing "400 Bad Request - Add a line with the key `lfsFile`,
+        `file` or `deletedFile`". Passing raw bytes instead of a generator fixes the problem.
+
+        See https://github.com/huggingface/huggingface_hub/issues/1371.
+        """
+        REPO_NAME = repo_name("CaSe_Is_ImPoRtAnT")
+        repo_id = self._api.create_repo(repo_id=REPO_NAME, exist_ok=False).repo_id
+
+        try:
+            self._api.create_commit(
+                repo_id=repo_id.lower(),  # API is case-insensitive!
+                commit_message="Add 1 regular and 1 LFs files.",
+                operations=[
+                    CommitOperationAdd(path_in_repo="file.txt", path_or_fileobj=b"content"),
+                    CommitOperationAdd(path_in_repo="lfs.bin", path_or_fileobj=b"LFS content"),
+                ],
+            )
+            repo_files = self._api.list_repo_files(repo_id=repo_id)
+            self.assertIn("file.txt", repo_files)
+            self.assertIn("lfs.bin", repo_files)
+        except Exception as err:
+            self.fail(err)
+        finally:
+            self._api.delete_repo(repo_id=repo_id)
+
 
 class HfApiUploadEmptyFileTest(HfApiCommonTestWithLogin):
     @classmethod
@@ -1290,6 +1333,10 @@ class HfApiBranchEndpointTest(HfApiCommonTestWithLogin):
         self._api.create_tag(repo_url.repo_id, tag="tag")
         self._api.create_branch(repo_url.repo_id, branch="tag")
 
+    @unittest.skip(
+        "Test user is flagged as isHF which gives permissions to create invalid references."
+        "Not relevant to test it anyway (i.e. it's more a server-side test)."
+    )
     @retry_endpoint
     @use_tmp_repo()
     def test_create_branch_forbidden_ref_branch_fails(self, repo_url: RepoUrl) -> None:
@@ -1847,6 +1894,137 @@ class HfApiPrivateTest(HfApiCommonTestWithLogin):
         self.assertGreaterEqual(new, orig)
 
 
+@pytest.mark.usefixtures("fx_cache_dir")
+class UploadFolderMockedTest(unittest.TestCase):
+    api = HfApi()
+    cache_dir: Path
+
+    def setUp(self) -> None:
+        (self.cache_dir / "file.txt").write_text("content")
+        (self.cache_dir / "lfs.bin").write_text("content")
+
+        (self.cache_dir / "sub").mkdir()
+        (self.cache_dir / "sub" / "file.txt").write_text("content")
+        (self.cache_dir / "sub" / "lfs_in_sub.bin").write_text("content")
+
+        (self.cache_dir / "subdir").mkdir()
+        (self.cache_dir / "subdir" / "file.txt").write_text("content")
+        (self.cache_dir / "subdir" / "lfs_in_subdir.bin").write_text("content")
+
+        self.all_local_files = {
+            "lfs.bin",
+            "file.txt",
+            "sub/file.txt",
+            "sub/lfs_in_sub.bin",
+            "subdir/file.txt",
+            "subdir/lfs_in_subdir.bin",
+        }
+
+        self.repo_files_mock = Mock()
+        self.repo_files_mock.return_value = [  # all remote files
+            ".gitattributes",
+            "file.txt",
+            "file1.txt",
+            "sub/file.txt",
+            "sub/file1.txt",
+            "subdir/file.txt",
+            "subdir/lfs_in_subdir.bin",
+        ]
+        self.api.list_repo_files = self.repo_files_mock
+
+        self.create_commit_mock = Mock()
+        self.create_commit_mock.return_value.pr_url = None
+        self.api.create_commit = self.create_commit_mock
+
+    def _upload_folder_alias(self, **kwargs) -> List[Union[CommitOperationAdd, CommitOperationDelete]]:
+        """Alias to call `upload_folder` + retrieve the CommitOperation list passed to `create_commit`."""
+        if "folder_path" not in kwargs:
+            kwargs["folder_path"] = self.cache_dir
+        self.api.upload_folder(repo_id="repo_id", **kwargs)
+        return self.create_commit_mock.call_args_list[0][1]["operations"]
+
+    def test_allow_everything(self):
+        operations = self._upload_folder_alias()
+        self.assertTrue(all(isinstance(op, CommitOperationAdd) for op in operations))
+        self.assertEqual({op.path_in_repo for op in operations}, self.all_local_files)
+
+    def test_allow_everything_in_subdir_no_trailing_slash(self):
+        operations = self._upload_folder_alias(folder_path=self.cache_dir / "subdir", path_in_repo="subdir")
+        self.assertTrue(all(isinstance(op, CommitOperationAdd) for op in operations))
+        self.assertEqual(
+            {op.path_in_repo for op in operations},
+            {"subdir/file.txt", "subdir/lfs_in_subdir.bin"},  # correct `path_in_repo`
+        )
+
+    def test_allow_everything_in_subdir_with_trailing_slash(self):
+        operations = self._upload_folder_alias(folder_path=self.cache_dir / "subdir", path_in_repo="subdir/")
+        self.assertTrue(all(isinstance(op, CommitOperationAdd) for op in operations))
+        self.assertEqual(
+            {op.path_in_repo for op in operations},
+            {"subdir/file.txt", "subdir/lfs_in_subdir.bin"},  # correct `path_in_repo`
+        )
+
+    def test_allow_txt_ignore_subdir(self):
+        operations = self._upload_folder_alias(allow_patterns="*.txt", ignore_patterns="subdir/*")
+        self.assertTrue(all(isinstance(op, CommitOperationAdd) for op in operations))
+        self.assertEqual(
+            {op.path_in_repo for op in operations},
+            {"sub/file.txt", "file.txt"},  # only .txt files, not in subdir
+        )
+
+    def test_allow_txt_not_root_ignore_subdir(self):
+        operations = self._upload_folder_alias(allow_patterns="**/*.txt", ignore_patterns="subdir/*")
+        self.assertTrue(all(isinstance(op, CommitOperationAdd) for op in operations))
+        self.assertEqual(
+            {op.path_in_repo for op in operations},
+            {"sub/file.txt"},  # only .txt files, not in subdir, not at root
+        )
+
+    def test_path_in_repo_dot(self):
+        """Regression test for #1382 when using `path_in_repo="."`.
+
+        Using `path_in_repo="."` or `path_in_repo=None` should be equivalent.
+        See https://github.com/huggingface/huggingface_hub/pull/1382.
+        """
+        operation_with_dot = self._upload_folder_alias(path_in_repo=".", allow_patterns=["file.txt"])[0]
+        operation_with_none = self._upload_folder_alias(path_in_repo=None, allow_patterns=["file.txt"])[0]
+        self.assertEqual(operation_with_dot.path_in_repo, "file.txt")
+        self.assertEqual(operation_with_none.path_in_repo, "file.txt")
+
+    def test_delete_txt(self):
+        operations = self._upload_folder_alias(delete_patterns="*.txt")
+        added_files = {op.path_in_repo for op in operations if isinstance(op, CommitOperationAdd)}
+        deleted_files = {op.path_in_repo for op in operations if isinstance(op, CommitOperationDelete)}
+
+        self.assertEqual(added_files, self.all_local_files)
+        self.assertEqual(deleted_files, {"file1.txt", "sub/file1.txt"})
+
+        # since "file.txt" and "sub/file.txt" are overwritten, no need to delete them first
+        self.assertIn("file.txt", added_files)
+        self.assertIn("sub/file.txt", added_files)
+
+    def test_delete_txt_in_sub(self):
+        operations = self._upload_folder_alias(
+            path_in_repo="sub/", folder_path=self.cache_dir / "sub", delete_patterns="*.txt"
+        )
+        added_files = {op.path_in_repo for op in operations if isinstance(op, CommitOperationAdd)}
+        deleted_files = {op.path_in_repo for op in operations if isinstance(op, CommitOperationDelete)}
+
+        self.assertEqual(added_files, {"sub/file.txt", "sub/lfs_in_sub.bin"})  # added only in sub/
+        self.assertEqual(deleted_files, {"sub/file1.txt"})  # delete only in sub/
+
+    def test_delete_txt_in_sub_ignore_sub_file_txt(self):
+        operations = self._upload_folder_alias(
+            path_in_repo="sub", folder_path=self.cache_dir / "sub", ignore_patterns="file.txt", delete_patterns="*.txt"
+        )
+        added_files = {op.path_in_repo for op in operations if isinstance(op, CommitOperationAdd)}
+        deleted_files = {op.path_in_repo for op in operations if isinstance(op, CommitOperationDelete)}
+
+        # since "sub/file.txt" should be deleted and is not overwritten (ignore_patterns), we delete it explicitly
+        self.assertEqual(added_files, {"sub/lfs_in_sub.bin"})  # no "sub/file.txt"
+        self.assertEqual(deleted_files, {"sub/file1.txt", "sub/file.txt"})
+
+
 @require_git_lfs
 class HfLargefilesTest(HfApiCommonTest):
     @classmethod
@@ -2081,12 +2259,12 @@ class HfApiDiscussionsTest(HfApiCommonTestWithLogin):
         rename_event = self._api.rename_discussion(
             repo_id=self.repo_name,
             discussion_num=self.discussion.num,
-            new_title="New titlee",
+            new_title="New title2",
         )
         retrieved = self._api.get_discussion_details(repo_id=self.repo_name, discussion_num=self.discussion.num)
-        self.assertIn(rename_event, retrieved.events)
+        self.assertIn(rename_event.id, (event.id for event in retrieved.events))
         self.assertEqual(rename_event.old_title, self.discussion.title)
-        self.assertEqual(rename_event.new_title, "New titlee")
+        self.assertEqual(rename_event.new_title, "New title2")
 
     def test_change_discussion_status(self):
         status_change_event = self._api.change_discussion_status(
@@ -2095,7 +2273,7 @@ class HfApiDiscussionsTest(HfApiCommonTestWithLogin):
             new_status="closed",
         )
         retrieved = self._api.get_discussion_details(repo_id=self.repo_name, discussion_num=self.discussion.num)
-        self.assertIn(status_change_event, retrieved.events)
+        self.assertIn(status_change_event.id, (event.id for event in retrieved.events))
         self.assertEqual(status_change_event.new_status, "closed")
 
         with self.assertRaises(ValueError):
@@ -2105,7 +2283,6 @@ class HfApiDiscussionsTest(HfApiCommonTestWithLogin):
                 new_status="published",
             )
 
-    # @unittest.skip("To unskip when create_commit works for arbitrary references")
     def test_merge_pull_request(self):
         self._api.create_commit(
             repo_id=self.repo_name,
@@ -2263,7 +2440,9 @@ class TestSpaceAPIProduction(unittest.TestCase):
         runtime_after_pause = self.api.pause_space(self.repo_id)
         self.assertEqual(runtime_after_pause.stage, SpaceStage.PAUSED)
 
-        runtime_after_restart = self.api.restart_space(self.repo_id)
+        self.api.restart_space(self.repo_id)
+        time.sleep(0.2)
+        runtime_after_restart = self.api.get_space_runtime(self.repo_id)
         self.assertIn(runtime_after_restart.stage, (SpaceStage.BUILDING, SpaceStage.RUNNING_BUILDING))
 
 
@@ -2340,6 +2519,68 @@ class ListGitRefsTest(unittest.TestCase):
             repo_type="dataset",
             revision=convert_branch.target_commit,
         )
+
+
+class ListGitCommitsTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.api = HfApi(token=TOKEN)
+        # Create repo (with initial commit)
+        cls.repo_id = cls.api.create_repo(repo_name()).repo_id
+
+        # Create a commit on `main` branch
+        cls.api.upload_file(repo_id=cls.repo_id, path_or_fileobj=b"content", path_in_repo="content.txt")
+
+        # Create a commit in a PR
+        cls.api.upload_file(repo_id=cls.repo_id, path_or_fileobj=b"on_pr", path_in_repo="on_pr.txt", create_pr=True)
+
+        # Create another commit on `main` branch
+        cls.api.upload_file(repo_id=cls.repo_id, path_or_fileobj=b"on_main", path_in_repo="on_main.txt")
+        return super().setUpClass()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.api.delete_repo(cls.repo_id)
+        return super().tearDownClass()
+
+    def test_list_commits_on_main(self) -> None:
+        commits = self.api.list_repo_commits(self.repo_id)
+
+        # "on_pr" commit not returned
+        self.assertEquals(len(commits), 3)
+        self.assertTrue(all("on_pr" not in commit.title for commit in commits))
+
+        # USER is always the author
+        self.assertTrue(all(commit.authors == [USER] for commit in commits))
+
+        # latest commit first
+        self.assertEquals(commits[0].title, "Upload on_main.txt with huggingface_hub")
+
+        # Formatted field not returned by default
+        for commit in commits:
+            self.assertIsNone(commit.formatted_title)
+            self.assertIsNone(commit.formatted_message)
+
+    def test_list_commits_on_pr(self) -> None:
+        commits = self.api.list_repo_commits(self.repo_id, revision="refs/pr/1")
+
+        # "on_pr" commit returned but not the "on_main" one
+        self.assertEquals(len(commits), 3)
+        self.assertTrue(all("on_main" not in commit.title for commit in commits))
+        self.assertEquals(commits[0].title, "Upload on_pr.txt with huggingface_hub")
+
+    def test_list_commits_include_formatted(self) -> None:
+        for commit in self.api.list_repo_commits(self.repo_id, formatted=True):
+            self.assertIsNotNone(commit.formatted_title)
+            self.assertIsNotNone(commit.formatted_message)
+
+    def test_list_commits_on_missing_repo(self) -> None:
+        with self.assertRaises(RepositoryNotFoundError):
+            self.api.list_repo_commits("missing_repo_id")
+
+    def test_list_commits_on_missing_revision(self) -> None:
+        with self.assertRaises(RevisionNotFoundError):
+            self.api.list_repo_commits(self.repo_id, revision="missing_revision")
 
 
 @patch("huggingface_hub.hf_api.build_hf_headers")
@@ -2468,3 +2709,57 @@ class RepoUrlTest(unittest.TestCase):
                 url = RepoUrl(_id)
                 self.assertEqual(url.repo_id, "squad")
                 self.assertEqual(url.repo_type, "dataset")
+
+
+class HfApiDuplicateSpaceTest(HfApiCommonTestWithLogin):
+    @retry_endpoint
+    @unittest.skip("HTTP 500 currently on staging")
+    def test_duplicate_space_success(self) -> None:
+        """Check `duplicate_space` works."""
+        from_repo_name = space_repo_name("original_repo_name")
+        from_repo_id = self._api.create_repo(
+            repo_id=from_repo_name,
+            repo_type="space",
+            space_sdk="static",
+            token=OTHER_TOKEN,
+        ).repo_id
+        self._api.upload_file(
+            path_or_fileobj=b"data",
+            path_in_repo="temp/new_file.md",
+            repo_id=from_repo_id,
+            repo_type="space",
+            token=OTHER_TOKEN,
+        )
+
+        to_repo_id = self._api.duplicate_space(from_repo_id).repo_id
+
+        self.assertEqual(to_repo_id, f"{USER}/{from_repo_name}")
+        self.assertEqual(
+            self._api.list_repo_files(repo_id=from_repo_id, repo_type="space"),
+            [".gitattributes", "README.md", "index.html", "style.css", "temp/new_file.md"],
+        )
+        self.assertEqual(
+            self._api.list_repo_files(repo_id=to_repo_id, repo_type="space"),
+            self._api.list_repo_files(repo_id=from_repo_id, repo_type="space"),
+        )
+
+        self._api.delete_repo(repo_id=from_repo_id, repo_type="space", token=OTHER_TOKEN)
+        self._api.delete_repo(repo_id=to_repo_id, repo_type="space")
+
+    def test_duplicate_space_from_missing_repo(self) -> None:
+        """Check `duplicate_space` fails when the from_repo doesn't exist."""
+
+        with self.assertRaises(RepositoryNotFoundError):
+            self._api.duplicate_space(f"{OTHER_USER}/repo_that_does_not_exist")
+
+
+class ReprMixinTest(unittest.TestCase):
+    def test_repr_mixin(self) -> None:
+        class MyClass(ReprMixin):
+            def __init__(self, **kwargs: Dict[str, Any]) -> None:
+                self.__dict__.update(kwargs)
+
+        self.assertEqual(
+            repr(MyClass(foo="foo", bar="bar")),
+            "MyClass: {'bar': 'bar', 'foo': 'foo'}",  # keys are sorted
+        )

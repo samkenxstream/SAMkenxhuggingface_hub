@@ -13,10 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
-import os
+import pprint
 import re
+import textwrap
 import warnings
 from dataclasses import dataclass, field
+from datetime import datetime
 from itertools import islice
 from pathlib import Path
 from typing import Any, BinaryIO, Dict, Iterable, Iterator, List, Optional, Tuple, Union
@@ -89,6 +91,17 @@ USERNAME_PLACEHOLDER = "hf_user"
 _REGEX_DISCUSSION_URL = re.compile(r".*/discussions/(\d+)$")
 
 logger = logging.get_logger(__name__)
+
+
+class ReprMixin:
+    """Mixin to create the __repr__ for a class"""
+
+    def __repr__(self):
+        formatted_value = pprint.pformat(self.__dict__, width=119, compact=True)
+        if "\n" in formatted_value:
+            return f"{self.__class__.__name__}: {{ \n{textwrap.indent(formatted_value, '  ')}\n}}"
+        else:
+            return f"{self.__class__.__name__}: {formatted_value}"
 
 
 def repo_type_and_id_from_hf_id(hf_id: str, hub_url: Optional[str] = None) -> Tuple[Optional[str], Optional[str], str]:
@@ -244,6 +257,7 @@ class RepoUrl(str):
     compatibility. At initialization, the URL is parsed to populate properties:
     - endpoint (`str`)
     - namespace (`Optional[str]`)
+    - repo_name (`str`)
     - repo_id (`str`)
     - repo_type (`Literal["model", "dataset", "space"]`)
     - url (`str`)
@@ -287,6 +301,7 @@ class RepoUrl(str):
 
         # Populate fields
         self.namespace = namespace
+        self.repo_name = repo_name
         self.repo_id = repo_name if namespace is None else f"{namespace}/{repo_name}"
         self.repo_type = repo_type or REPO_TYPE_MODEL
         self.url = str(self)  # just in case it's needed
@@ -295,7 +310,7 @@ class RepoUrl(str):
         return f"RepoUrl('{self}', endpoint='{self.endpoint}', repo_type='{self.repo_type}', repo_id='{self.repo_id}')"
 
 
-class RepoFile:
+class RepoFile(ReprMixin):
     """
     Data structure that represents a public file inside a repo, accessible from
     huggingface.co
@@ -336,12 +351,8 @@ class RepoFile:
         for k, v in kwargs.items():
             setattr(self, k, v)
 
-    def __repr__(self):
-        items = (f"{k}='{v}'" for k, v in self.__dict__.items())
-        return f"{self.__class__.__name__}({', '.join(items)})"
 
-
-class ModelInfo:
+class ModelInfo(ReprMixin):
     """
     Info about a model accessible from huggingface.co
 
@@ -399,12 +410,6 @@ class ModelInfo:
         for k, v in kwargs.items():
             setattr(self, k, v)
 
-    def __repr__(self):
-        s = f"{self.__class__.__name__}:" + " {"
-        for key, val in self.__dict__.items():
-            s += f"\n\t{key}: {val}"
-        return s + "\n}"
-
     def __str__(self):
         r = f"Model Name: {self.modelId}, Tags: {self.tags}"
         if self.pipeline_tag:
@@ -412,7 +417,7 @@ class ModelInfo:
         return r
 
 
-class DatasetInfo:
+class DatasetInfo(ReprMixin):
     """
     Info about a dataset accessible from huggingface.co
 
@@ -423,7 +428,7 @@ class DatasetInfo:
             repo sha at this particular revision
         lastModified (`str`, *optional*):
             date of last commit to repo
-        tags (`Listr[str]`, *optional*):
+        tags (`List[str]`, *optional*):
             List of tags.
         siblings (`List[RepoFile]`, *optional*):
             list of [`huggingface_hub.hf_api.RepoFile`] objects that constitute the dataset.
@@ -473,18 +478,12 @@ class DatasetInfo:
         for k, v in kwargs.items():
             setattr(self, k, v)
 
-    def __repr__(self):
-        s = f"{self.__class__.__name__}:" + " {"
-        for key, val in self.__dict__.items():
-            s += f"\n\t{key}: {val}"
-        return s + "\n}"
-
     def __str__(self):
         r = f"Dataset Name: {self.id}, Tags: {self.tags}"
         return r
 
 
-class SpaceInfo:
+class SpaceInfo(ReprMixin):
     """
     Info about a Space accessible from huggingface.co
 
@@ -528,14 +527,8 @@ class SpaceInfo:
         for k, v in kwargs.items():
             setattr(self, k, v)
 
-    def __repr__(self):
-        s = f"{self.__class__.__name__}:" + " {"
-        for key, val in self.__dict__.items():
-            s += f"\n\t{key}: {val}"
-        return s + "\n}"
 
-
-class MetricInfo:
+class MetricInfo(ReprMixin):
     """
     Info about a public metric accessible from huggingface.co
     """
@@ -557,12 +550,6 @@ class MetricInfo:
         # Store all the other fields returned by the API
         for k, v in kwargs.items():
             setattr(self, k, v)
-
-    def __repr__(self):
-        s = f"{self.__class__.__name__}:" + " {"
-        for key, val in self.__dict__.items():
-            s += f"\n\t{key}: {val}"
-        return s + "\n}"
 
     def __str__(self):
         r = f"Metric Name: {self.id}"
@@ -713,6 +700,49 @@ class GitRefs:
     branches: List[GitRefInfo]
     converts: List[GitRefInfo]
     tags: List[GitRefInfo]
+
+
+@dataclass
+class GitCommitInfo:
+    """
+    Contains information about a git commit for a repo on the Hub. Check out [`list_repo_commits`] for more details.
+
+    Args:
+        commit_id (`str`):
+            OID of the commit (e.g. `"e7da7f221d5bf496a48136c0cd264e630fe9fcc8"`)
+        authors (`List[str]`):
+            List of authors of the commit.
+        created_at (`datetime`):
+            Datetime when the commit was created.
+        title (`str`):
+            Title of the commit. This is a free-text value entered by the authors.
+        message (`str`):
+            Description of the commit. This is a free-text value entered by the authors.
+        formatted_title (`str`):
+            Title of the commit formatted as HTML. Only returned if `formatted=True` is set.
+        formatted_message (`str`):
+            Description of the commit formatted as HTML. Only returned if `formatted=True` is set.
+    """
+
+    commit_id: str
+
+    authors: List[str]
+    created_at: datetime
+    title: str
+    message: str
+
+    formatted_title: Optional[str]
+    formatted_message: Optional[str]
+
+    def __init__(self, data: Dict) -> None:
+        self.commit_id = data["id"]
+        self.authors = [author["user"] for author in data["authors"]]
+        self.created_at = parse_datetime(data["date"])
+        self.title = data["title"]
+        self.message = data["message"]
+
+        self.formatted_title = data.get("formatted", {}).get("title")
+        self.formatted_message = data.get("formatted", {}).get("message")
 
 
 @dataclass
@@ -1742,6 +1772,9 @@ class HfApi:
             revision (`str`, *optional*):
                 The revision of the repository from which to get the
                 information.
+            repo_type (`str`, *optional*):
+                Set to `"dataset"` or `"space"` if getting repository info from a dataset or a space,
+                `None` or `"model"` if getting repository info from a model. Default is `None`.
             timeout (`float`, *optional*):
                 Whether to set a timeout for the request to the Hub.
             files_metadata (`bool`, *optional*):
@@ -1821,6 +1854,7 @@ class HfApi:
         Returns:
             `List[str]`: the list of files in a given repository.
         """
+        # TODO: use https://huggingface.co/api/{repo_type}/{repo_id}/tree/{revision}/{subfolder}
         repo_info = self.repo_info(
             repo_id,
             revision=revision,
@@ -1890,6 +1924,84 @@ class HfApi:
             converts=[GitRefInfo(item) for item in data["converts"]],
             tags=[GitRefInfo(item) for item in data["tags"]],
         )
+
+    @validate_hf_hub_args
+    def list_repo_commits(
+        self,
+        repo_id: str,
+        *,
+        repo_type: Optional[str] = None,
+        token: Optional[Union[bool, str]] = None,
+        revision: Optional[str] = None,
+        formatted: bool = False,
+    ) -> List[GitCommitInfo]:
+        """
+        Get the list of commits of a given revision for a repo on the Hub.
+
+        Commits are sorted by date (last commit first).
+
+        Args:
+            repo_id (`str`):
+                A namespace (user or an organization) and a repo name separated by a `/`.
+            repo_type (`str`, *optional*):
+                Set to `"dataset"` or `"space"` if listing commits from a dataset or a Space, `None` or `"model"` if
+                listing from a model. Default is `None`.
+            token (`bool` or `str`, *optional*):
+                A valid authentication token (see https://huggingface.co/settings/token).
+                If `None` or `True` and machine is logged in (through `huggingface-cli login`
+                or [`~huggingface_hub.login`]), token will be retrieved from the cache.
+                If `False`, token is not sent in the request header.
+            revision (`str`, *optional*):
+                The git revision to commit from. Defaults to the head of the `"main"` branch.
+            formatted (`bool`):
+                Whether to return the HTML-formatted title and description of the commits. Defaults to False.
+
+        Example:
+        ```py
+        >>> from huggingface_hub import HfApi
+        >>> api = HfApi()
+
+        # Commits are sorted by date (last commit first)
+        >>> initial_commit = api.list_repo_commits("gpt2")[-1]
+
+        # Initial commit is always a system commit containing the `.gitattributes` file.
+        >>> initial_commit
+        GitCommitInfo(
+            commit_id='9b865efde13a30c13e0a33e536cf3e4a5a9d71d8',
+            authors=['system'],
+            created_at=datetime.datetime(2019, 2, 18, 10, 36, 15, tzinfo=datetime.timezone.utc),
+            title='initial commit',
+            message='',
+            formatted_title=None,
+            formatted_message=None
+        )
+
+        # Create an empty branch by deriving from initial commit
+        >>> api.create_branch("gpt2", "new_empty_branch", revision=initial_commit.commit_id)
+        ```
+
+        Returns:
+            List[[`GitCommitInfo`]]: list of objects containing information about the commits for a repo on the Hub.
+
+        Raises:
+            [`~utils.RepositoryNotFoundError`]:
+                If repository is not found (error 404): wrong repo_id/repo_type, private but not authenticated or repo
+                does not exist.
+            [`~utils.RevisionNotFoundError`]:
+                If revision is not found (error 404) on the repo.
+        """
+        repo_type = repo_type or REPO_TYPE_MODEL
+        revision = quote(revision, safe="") if revision is not None else DEFAULT_REVISION
+
+        # Paginate over results and return the list of commits.
+        return [
+            GitCommitInfo(item)
+            for item in paginate(
+                f"{self.endpoint}/api/{repo_type}s/{repo_id}/commits/{revision}",
+                headers=self._build_hf_headers(token=token),
+                params={"expand[]": "formatted"} if formatted else {},
+            )
+        ]
 
     @validate_hf_hub_args
     def create_repo(
@@ -1970,6 +2082,15 @@ class HfApi:
             if exist_ok and err.response.status_code == 409:
                 # Repo already exists and `exist_ok=True`
                 pass
+            elif exist_ok and err.response.status_code == 403:
+                # No write permission on the namespace but repo might already exist
+                try:
+                    self.repo_info(repo_id=repo_id, repo_type=repo_type, token=token)
+                    if repo_type is None or repo_type == REPO_TYPE_MODEL:
+                        return RepoUrl(f"{self.endpoint}/{repo_id}")
+                    return RepoUrl(f"{self.endpoint}/{repo_type}/{repo_id}")
+                except HfHubHTTPError:
+                    raise
             else:
                 raise
 
@@ -2314,14 +2435,11 @@ class HfApi:
             "Content-Type": "application/x-ndjson",
             **self._build_hf_headers(token=token, is_write_action=True),
         }
+        data = b"".join(_payload_as_ndjson())
+        params = {"create_pr": "1"} if create_pr else None
 
         try:
-            commit_resp = requests.post(
-                url=commit_url,
-                headers=headers,
-                data=_payload_as_ndjson(),  # type: ignore
-                params={"create_pr": "1"} if create_pr else None,
-            )
+            commit_resp = requests.post(url=commit_url, headers=headers, data=data, params=params)
             hf_raise_for_status(commit_resp, endpoint_name="commit")
         except RepositoryNotFoundError as e:
             e.append_to_message(_CREATE_COMMIT_NO_REPO_ERROR_MESSAGE)
@@ -2508,21 +2626,25 @@ class HfApi:
         parent_commit: Optional[str] = None,
         allow_patterns: Optional[Union[List[str], str]] = None,
         ignore_patterns: Optional[Union[List[str], str]] = None,
+        delete_patterns: Optional[Union[List[str], str]] = None,
     ):
         """
-        Upload a local folder to the given repo. The upload is done
-        through a HTTP requests, and doesn't require git or git-lfs to be
-        installed.
+        Upload a local folder to the given repo. The upload is done through a HTTP request and doesn't require git or
+        git-lfs to be installed.
 
-        The structure of the folder will be preserved. Files with the same name
-        already present in the repository will be overwritten, others will be left untouched.
+        The structure of the folder will be preserved. Files with the same name already present in the repository will
+        be overwritten. Others will be left untouched.
 
-        Use the `allow_patterns` and `ignore_patterns` arguments to specify which files
-        to upload. These parameters accept either a single pattern or a list of
-        patterns. Patterns are Standard Wildcards (globbing patterns) as documented
-        [here](https://tldp.org/LDP/GNU-Linux-Tools-Summary/html/x11655.htm). If both
-        `allow_patterns` and `ignore_patterns` are provided, both constraints apply. By
-        default, all files from the folder are uploaded.
+        Use the `allow_patterns` and `ignore_patterns` arguments to specify which files to upload. These parameters
+        accept either a single pattern or a list of patterns. Patterns are Standard Wildcards (globbing patterns) as
+        documented [here](https://tldp.org/LDP/GNU-Linux-Tools-Summary/html/x11655.htm). If both `allow_patterns` and
+        `ignore_patterns` are provided, both constraints apply. By default, all files from the folder are uploaded.
+
+        Use the `delete_patterns` argument to specify remote files you want to delete. Input type is the same as for
+        `allow_patterns` (see above). If `path_in_repo` is also provided, the patterns are matched against paths
+        relative to this folder. For example, `upload_folder(..., path_in_repo="experiment", delete_patterns="logs/*")`
+        will delete any remote file under `experiment/logs/`. Note that the `.gitattributes` file will not be deleted
+        even if it matches the patterns.
 
         Uses `HfApi.create_commit` under the hood.
 
@@ -2565,6 +2687,10 @@ class HfApi:
                 If provided, only files matching at least one pattern are uploaded.
             ignore_patterns (`List[str]` or `str`, *optional*):
                 If provided, files matching any of the patterns are not uploaded.
+            delete_patterns (`List[str]` or `str`, *optional*):
+                If provided, remote files matching any of the patterns will be deleted from the repo while committing
+                new files. This is useful if you don't know which files have already been uploaded.
+                Note: to avoid discrepancies the `.gitattributes` file is not deleted even if it matches the pattern.
 
         Returns:
             `str`: A URL to visualize the uploaded folder on the hub
@@ -2582,16 +2708,16 @@ class HfApi:
 
         <Tip warning={true}>
 
-        `upload_folder` assumes that the repo already exists on the Hub. If you get a
-        Client error 404, please make sure you are authenticated and that `repo_id` and
-        `repo_type` are set correctly. If repo does not exist, create it first using
-        [`~hf_api.create_repo`].
+        `upload_folder` assumes that the repo already exists on the Hub. If you get a Client error 404, please make
+        sure you are authenticated and that `repo_id` and `repo_type` are set correctly. If repo does not exist, create
+        it first using [`~hf_api.create_repo`].
 
         </Tip>
 
         Example:
 
         ```python
+        # Upload checkpoints folder except the log files
         >>> upload_folder(
         ...     folder_path="local/checkpoints",
         ...     path_in_repo="remote/experiment/checkpoints",
@@ -2602,6 +2728,19 @@ class HfApi:
         ... )
         # "https://huggingface.co/datasets/username/my-dataset/tree/main/remote/experiment/checkpoints"
 
+        # Upload checkpoints folder including logs while deleting existing logs from the repo
+        # Useful if you don't know exactly which log files have already being pushed
+        >>> upload_folder(
+        ...     folder_path="local/checkpoints",
+        ...     path_in_repo="remote/experiment/checkpoints",
+        ...     repo_id="username/my-dataset",
+        ...     repo_type="datasets",
+        ...     token="my_token",
+        ...     delete_patterns="**/logs/*.txt",
+        ... )
+        "https://huggingface.co/datasets/username/my-dataset/tree/main/remote/experiment/checkpoints"
+
+        # Upload checkpoints folder while creating a PR
         >>> upload_folder(
         ...     folder_path="local/checkpoints",
         ...     path_in_repo="remote/experiment/checkpoints",
@@ -2625,17 +2764,33 @@ class HfApi:
             commit_message if commit_message is not None else f"Upload {path_in_repo} with huggingface_hub"
         )
 
-        files_to_add = _prepare_upload_folder_commit(
+        delete_operations = self._prepare_upload_folder_deletions(
+            repo_id=repo_id,
+            repo_type=repo_type,
+            revision=DEFAULT_REVISION if create_pr else revision,
+            token=token,
+            path_in_repo=path_in_repo,
+            delete_patterns=delete_patterns,
+        )
+        add_operations = _prepare_upload_folder_additions(
             folder_path,
             path_in_repo,
             allow_patterns=allow_patterns,
             ignore_patterns=ignore_patterns,
         )
 
+        # Optimize operations: if some files will be overwritten, we don't need to delete them first
+        if len(add_operations) > 0:
+            added_paths = set(op.path_in_repo for op in add_operations)
+            delete_operations = [
+                delete_op for delete_op in delete_operations if delete_op.path_in_repo not in added_paths
+            ]
+        commit_operations = delete_operations + add_operations
+
         commit_info = self.create_commit(
             repo_type=repo_type,
             repo_id=repo_id,
-            operations=files_to_add,
+            operations=commit_operations,
             commit_message=commit_message,
             commit_description=commit_description,
             token=token,
@@ -2817,7 +2972,8 @@ class HfApi:
         exist_ok: bool = False,
     ) -> None:
         """
-        Create a new branch from `main` on a repo on the Hub.
+        Create a new branch for a repo on the Hub, starting from the specified revision (defaults to `main`).
+        To find a revision suiting your needs, you can use [`list_repo_refs`] or [`list_repo_commits`].
 
         Args:
             repo_id (`str`):
@@ -3329,7 +3485,7 @@ class HfApi:
 
         Creating a Pull Request with changes can also be done at once with [`HfApi.create_commit`];
 
-        This is a wrapper around [`HfApi.create_discusssion`].
+        This is a wrapper around [`HfApi.create_discussion`].
 
         Args:
             repo_id (`str`):
@@ -3944,6 +4100,93 @@ class HfApi:
         hf_raise_for_status(r)
         return SpaceRuntime(r.json())
 
+    @validate_hf_hub_args
+    def duplicate_space(
+        self,
+        from_id: str,
+        to_id: Optional[str] = None,
+        *,
+        private: Optional[bool] = None,
+        token: Optional[str] = None,
+        exist_ok: bool = False,
+    ) -> str:
+        """Duplicate a Space.
+
+        Programmatically duplicate a Space. The new Space will be created in your account and will be in the same state
+        as the original Space (running or paused). You can duplicate a Space no matter the current state of a Space.
+
+        Args:
+            from_id (`str`):
+                ID of the Space to duplicate. Example: `"pharma/CLIP-Interrogator"`.
+            to_id (`str`, *optional*):
+                ID of the new Space. Example: `"dog/CLIP-Interrogator"`. If not provided, the new Space will have the same
+                name as the original Space, but in your account.
+            private (`bool`, *optional*):
+                Whether the new Space should be private or not. Defaults to the same privacy as the original Space.
+            token (`str`, *optional*):
+                Hugging Face token. Will default to the locally saved token if not provided.
+            exist_ok (`bool`, *optional*, defaults to `False`):
+                If `True`, do not raise an error if repo already exists.
+
+        Returns:
+            [`RepoUrl`]: URL to the newly created repo. Value is a subclass of `str` containing
+            attributes like `endpoint`, `repo_type` and `repo_id`.
+
+        Raises:
+            - [`HTTPError`](https://2.python-requests.org/en/master/api/#requests.HTTPError)
+              if the HuggingFace API returned an error
+            - [`~utils.RepositoryNotFoundError`]
+              If one of `from_id` or `to_id` cannot be found. This may be because it doesn't exist,
+              or because it is set to `private` and you do not have access.
+
+        Example:
+        ```python
+        >>> from huggingface_hub import duplicate_space
+
+        # Duplicate a Space to your account
+        >>> duplicate_space("multimodalart/dreambooth-training")
+        RepoUrl('https://huggingface.co/spaces/nateraw/dreambooth-training',...)
+
+        # Can set custom destination id and visibility flag.
+        >>> duplicate_space("multimodalart/dreambooth-training", to_id="my-dreambooth", private=True)
+        RepoUrl('https://huggingface.co/spaces/nateraw/my-dreambooth',...)
+        ```
+        """
+        # Parse to_id if provided
+        parsed_to_id = RepoUrl(to_id) if to_id is not None else None
+
+        # Infer target repo_id
+        to_namespace = (  # set namespace manually or default to username
+            parsed_to_id.namespace
+            if parsed_to_id is not None and parsed_to_id.namespace is not None
+            else self.whoami(token)["name"]
+        )
+        to_repo_name = parsed_to_id.repo_name if to_id is not None else RepoUrl(from_id).repo_name  # type: ignore
+
+        # repository must be a valid repo_id (namespace/repo_name).
+        payload: Dict[str, Any] = {"repository": f"{to_namespace}/{to_repo_name}"}
+
+        # private is optional with this endpoint, with None defaulting to the original space's privacy.
+        if private is not None:
+            payload["private"] = private
+
+        r = requests.post(
+            f"{self.endpoint}/api/spaces/{from_id}/duplicate",
+            headers=self._build_hf_headers(token=token, is_write_action=True),
+            json=payload,
+        )
+
+        try:
+            hf_raise_for_status(r)
+        except HTTPError as err:
+            if exist_ok and err.response.status_code == 409:
+                # Repo already exists and `exist_ok=True`
+                pass
+            else:
+                raise
+
+        return RepoUrl(r.json()["url"], endpoint=self.endpoint)
+
     def _build_hf_headers(
         self,
         token: Optional[Union[bool, str]] = None,
@@ -3967,8 +4210,48 @@ class HfApi:
             user_agent=user_agent or self.user_agent,
         )
 
+    def _prepare_upload_folder_deletions(
+        self,
+        repo_id: str,
+        repo_type: Optional[str],
+        revision: Optional[str],
+        token: Optional[str],
+        path_in_repo: str,
+        delete_patterns: Optional[Union[List[str], str]],
+    ) -> List[CommitOperationDelete]:
+        """Generate the list of Delete operations for a commit to delete files from a repo.
 
-def _prepare_upload_folder_commit(
+        List remote files and match them against the `delete_patterns` constraints. Returns a list of [`CommitOperationDelete`]
+        with the matching items.
+
+        Note: `.gitattributes` file is essential to make a repo work properly on the Hub. This file will always be
+              kept even if it matches the `delete_patterns` constraints.
+        """
+        if delete_patterns is None:
+            # If no delete patterns, no need to list and filter remote files
+            return []
+
+        # List remote files
+        filenames = self.list_repo_files(repo_id=repo_id, revision=revision, repo_type=repo_type, token=token)
+
+        # Compute relative path in repo
+        if path_in_repo:
+            path_in_repo = path_in_repo.strip("/") + "/"  # harmonize
+            relpath_to_abspath = {
+                file[len(path_in_repo) :]: file for file in filenames if file.startswith(path_in_repo)
+            }
+        else:
+            relpath_to_abspath = {file: file for file in filenames}
+
+        # Apply filter on relative paths and return
+        return [
+            CommitOperationDelete(path_in_repo=relpath_to_abspath[relpath], is_folder=False)
+            for relpath in filter_repo_objects(relpath_to_abspath.keys(), allow_patterns=delete_patterns)
+            if relpath_to_abspath[relpath] != ".gitattributes"
+        ]
+
+
+def _prepare_upload_folder_additions(
     folder_path: Union[str, Path],
     path_in_repo: str,
     allow_patterns: Optional[Union[List[str], str]] = None,
@@ -3979,30 +4262,29 @@ def _prepare_upload_folder_commit(
     Files not matching the `allow_patterns` (allowlist) and `ignore_patterns` (denylist)
     constraints are discarded.
     """
-    folder_path = os.path.normpath(os.path.expanduser(folder_path))
-    if not os.path.isdir(folder_path):
+    folder_path = Path(folder_path).expanduser().resolve()
+    if not folder_path.is_dir():
         raise ValueError(f"Provided path: '{folder_path}' is not a directory")
 
-    files_to_add: List[CommitOperationAdd] = []
-    for dirpath, _, filenames in os.walk(folder_path):
-        for filename in filenames:
-            abs_path = os.path.join(dirpath, filename)
-            rel_path = os.path.relpath(abs_path, folder_path)
-            files_to_add.append(
-                CommitOperationAdd(
-                    path_or_fileobj=abs_path,
-                    path_in_repo=os.path.normpath(os.path.join(path_in_repo, rel_path)).replace(os.sep, "/"),
-                )
-            )
+    # List files from folder
+    relpath_to_abspath = {
+        path.relative_to(folder_path).as_posix(): path
+        for path in sorted(folder_path.glob("**/*"))  # sorted to be deterministic
+        if path.is_file()
+    }
 
-    return list(
-        filter_repo_objects(
-            files_to_add,
-            allow_patterns=allow_patterns,
-            ignore_patterns=ignore_patterns,
-            key=lambda x: x.path_in_repo,
+    # Filter files and return
+    # Patterns are applied on the path relative to `folder_path`. `path_in_repo` is prefixed after the filtering.
+    prefix = f"{path_in_repo.strip('/')}/" if path_in_repo else ""
+    return [
+        CommitOperationAdd(
+            path_or_fileobj=relpath_to_abspath[relpath],  # absolute path on disk
+            path_in_repo=prefix + relpath,  # "absolute" path in repo
         )
-    )
+        for relpath in filter_repo_objects(
+            relpath_to_abspath.keys(), allow_patterns=allow_patterns, ignore_patterns=ignore_patterns
+        )
+    ]
 
 
 def _parse_revision_from_pr_url(pr_url: str) -> str:
@@ -4039,6 +4321,7 @@ space_info = api.space_info
 repo_info = api.repo_info
 list_repo_files = api.list_repo_files
 list_repo_refs = api.list_repo_refs
+list_repo_commits = api.list_repo_commits
 
 list_metrics = api.list_metrics
 
@@ -4083,3 +4366,4 @@ get_space_runtime = api.get_space_runtime
 request_space_hardware = api.request_space_hardware
 pause_space = api.pause_space
 restart_space = api.restart_space
+duplicate_space = api.duplicate_space

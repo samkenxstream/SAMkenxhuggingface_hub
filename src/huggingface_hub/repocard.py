@@ -13,6 +13,7 @@ from huggingface_hub.repocard_data import (
     DatasetCardData,
     EvalResult,
     ModelCardData,
+    SpaceCardData,
     eval_results_to_model_index,
     model_index_to_eval_results,
 )
@@ -39,7 +40,7 @@ class RepoCard:
     default_template_path = TEMPLATE_MODELCARD_PATH
     repo_type = "model"
 
-    def __init__(self, content: str):
+    def __init__(self, content: str, ignore_metadata_errors: bool = False):
         """Initialize a RepoCard from string content. The content should be a
         Markdown file with a YAML block at the beginning and a Markdown body.
 
@@ -75,6 +76,7 @@ class RepoCard:
 
         # Set the content of the RepoCard, as well as underlying .data and .text attributes.
         # See the `content` property setter for more details.
+        self.ignore_metadata_errors = ignore_metadata_errors
         self.content = content
 
     @property
@@ -104,7 +106,7 @@ class RepoCard:
             data_dict = {}
             self.text = content
 
-        self.data = self.card_data_class(**data_dict)
+        self.data = self.card_data_class(**data_dict, ignore_metadata_errors=self.ignore_metadata_errors)
 
     def __str__(self):
         return self.content
@@ -135,6 +137,7 @@ class RepoCard:
         repo_id_or_path: Union[str, Path],
         repo_type: Optional[str] = None,
         token: Optional[str] = None,
+        ignore_metadata_errors: bool = False,
     ):
         """Initialize a RepoCard from a Hugging Face Hub repo's README.md or a local filepath.
 
@@ -142,13 +145,14 @@ class RepoCard:
             repo_id_or_path (`Union[str, Path]`):
                 The repo ID associated with a Hugging Face Hub repo or a local filepath.
             repo_type (`str`, *optional*):
-                The type of Hugging Face repo to push to. Defaults to None, which will use
-                use "model". Other options are "dataset" and "space". Not used when loading from
-                a local filepath. If this is called from a child class, the default value will be
-                the child class's `repo_type`.
+                The type of Hugging Face repo to push to. Defaults to None, which will use use "model". Other options
+                are "dataset" and "space". Not used when loading from a local filepath. If this is called from a child
+                class, the default value will be the child class's `repo_type`.
             token (`str`, *optional*):
-                Authentication token, obtained with `huggingface_hub.HfApi.login` method. Will default to
-                the stored token.
+                Authentication token, obtained with `huggingface_hub.HfApi.login` method. Will default to the stored token.
+            ignore_metadata_errors (`str`):
+                If True, errors while parsing the metadata section will be ignored. Some information might be lost during
+                the process. Use it at your own risk.
 
         Returns:
             [`huggingface_hub.repocard.RepoCard`]: The RepoCard (or subclass) initialized from the repo's
@@ -166,18 +170,20 @@ class RepoCard:
         if Path(repo_id_or_path).exists():
             card_path = Path(repo_id_or_path)
         elif isinstance(repo_id_or_path, str):
-            card_path = hf_hub_download(
-                repo_id_or_path,
-                REPOCARD_NAME,
-                repo_type=repo_type or cls.repo_type,
-                token=token,
+            card_path = Path(
+                hf_hub_download(
+                    repo_id_or_path,
+                    REPOCARD_NAME,
+                    repo_type=repo_type or cls.repo_type,
+                    token=token,
+                )
             )
         else:
             raise ValueError(f"Cannot load RepoCard: path not found on disk ({repo_id_or_path}).")
 
         # Preserve newlines in the existing file.
-        with Path(card_path).open(mode="r", newline="", encoding="utf-8") as f:
-            return cls(f.read())
+        with card_path.open(mode="r", newline="", encoding="utf-8") as f:
+            return cls(f.read(), ignore_metadata_errors=ignore_metadata_errors)
 
     def validate(self, repo_type: Optional[str] = None):
         """Validates card against Hugging Face Hub's card validation logic.
@@ -358,7 +364,7 @@ class ModelCard(RepoCard):
             ...     license='mit',
             ...     library_name='timm',
             ...     tags=['image-classification', 'resnet'],
-            ...     datasets='beans',
+            ...     datasets=['beans'],
             ...     metrics=['accuracy'],
             ... )
             >>> card = ModelCard.from_template(
@@ -463,10 +469,16 @@ class DatasetCard(RepoCard):
         return super().from_template(card_data, template_path, **template_kwargs)
 
 
+class SpaceCard(RepoCard):
+    card_data_class = SpaceCardData
+    default_template_path = TEMPLATE_MODELCARD_PATH
+    repo_type = "space"
+
+
 def _detect_line_ending(content: str) -> Literal["\r", "\n", "\r\n", None]:  # noqa: F722
     """Detect the line ending of a string. Used by RepoCard to avoid making huge diff on newlines.
 
-    Uses same implem as in Hub server, keep it in sync.
+    Uses same implementation as in Hub server, keep it in sync.
 
     Returns:
         str: The detected line ending of the string.
@@ -787,18 +799,13 @@ def metadata_update(
                         card.data.eval_results.append(new_result)
         else:
             # Any metadata that is not a result metric
-            if (
-                hasattr(card.data, key)
-                and getattr(card.data, key) is not None
-                and not overwrite
-                and getattr(card.data, key) != value
-            ):
+            if card.data.get(key) is not None and not overwrite and card.data.get(key) != value:
                 raise ValueError(
                     f"You passed a new value for the existing meta data field '{key}'."
                     " Set `overwrite=True` to overwrite existing metadata."
                 )
             else:
-                setattr(card.data, key, value)
+                card.data[key] = value
 
     return card.push_to_hub(
         repo_id,

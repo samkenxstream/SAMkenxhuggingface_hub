@@ -15,10 +15,10 @@ def _is_true(value: Optional[str]) -> bool:
     return value.upper() in ENV_VARS_TRUE_VALUES
 
 
-def _is_true_or_auto(value: Optional[str]) -> bool:
+def _as_int(value: Optional[str]) -> Optional[int]:
     if value is None:
-        return False
-    return value.upper() in ENV_VARS_TRUE_AND_AUTO_VALUES
+        return None
+    return int(value)
 
 
 # Constants for file downloads
@@ -85,7 +85,10 @@ default_assets_cache_path = os.path.join(hf_cache_home, "assets")
 HUGGINGFACE_HUB_CACHE = os.getenv("HUGGINGFACE_HUB_CACHE", default_cache_path)
 HUGGINGFACE_ASSETS_CACHE = os.getenv("HUGGINGFACE_ASSETS_CACHE", default_assets_cache_path)
 
-HF_HUB_OFFLINE = _is_true(os.environ.get("HF_HUB_OFFLINE"))
+HF_HUB_OFFLINE = _is_true(os.environ.get("HF_HUB_OFFLINE") or os.environ.get("TRANSFORMERS_OFFLINE"))
+
+# Opt-out from telemetry requests
+HF_HUB_DISABLE_TELEMETRY = _is_true(os.environ.get("HF_HUB_DISABLE_TELEMETRY") or os.environ.get("DISABLE_TELEMETRY"))
 
 # In the past, token was stored in a hardcoded location
 # `_OLD_HF_TOKEN_PATH` is deprecated and will be removed "at some point".
@@ -115,3 +118,11 @@ HF_HUB_DISABLE_IMPLICIT_TOKEN: bool = _is_true(os.environ.get("HF_HUB_DISABLE_IM
 # - https://pypi.org/project/hf-transfer/
 # - https://github.com/huggingface/hf_transfer (private)
 HF_HUB_ENABLE_HF_TRANSFER: bool = _is_true(os.environ.get("HF_HUB_ENABLE_HF_TRANSFER"))
+
+
+# Used if download to `local_dir` and `local_dir_use_symlinks="auto"`
+# Files smaller than 5MB are copy-pasted while bigger files are symlinked. The idea is to save disk-usage by symlinking
+# huge files (i.e. LFS files most of the time) while allowing small files to be manually edited in local folder.
+HF_HUB_LOCAL_DIR_AUTO_SYMLINK_THRESHOLD: int = (
+    _as_int(os.environ.get("HF_HUB_LOCAL_DIR_AUTO_SYMLINK_THRESHOLD")) or 5 * 1024 * 1024
+)
